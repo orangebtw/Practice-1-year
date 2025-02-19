@@ -8,6 +8,9 @@ from datetime import datetime, UTC
 from dataclasses import dataclass
 import calendar
 from typing import Any
+from enum import Enum
+
+from dateutil.relativedelta import relativedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -546,6 +549,18 @@ class Reminder:
     text: str
     active: bool = True
 
+class NewReminderState(StatesGroup):
+    text = State()
+    date = State()
+
+class TimeUnit(Enum):
+    YEAR = 1
+    MONTH = 2
+    DAY = 3
+    HOUR = 4
+    MINUTE = 5
+    SECOND = 6
+
 REMINDERS: dict[int, list[Reminder]] = {}
 
 WEATHER_COMMAND = BotCommand(command="weather", description="Получить прогноз погоды")
@@ -571,6 +586,10 @@ START_MESSAGE = """
     - Показывать текущую погоду в любом городе мира с помощью команды /weather
     - Играть в камень, ножницы, бумага с помощью команды /rps
     - Создавать напоминания с помощью команды /reminder
+    
+Остальные команды:
+    /cancel - Отменить текущее действие (Например создание напоминания)
+    /reminders - Показать список всех напоминаний
 """
 
 owm = OWM(OWM_TOKEN, config=OWM_CONFIG)
@@ -580,11 +599,23 @@ bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="html"))
 dp = Dispatcher()
 reminder_router = Router()
 
-class NewReminderState(StatesGroup):
-    text = State()
-    date = State()
+def get_word_case(count: int, words: list[str]) -> str:
+    ONE = 0
+    FEW = 1
+    OTHER = 2
+    
+    if (count % 10 == 1) and not (count % 100 == 11):
+        return words[ONE]
+    
+    if (count % 100) > 11 and (count % 100) <= 15:
+        return words[OTHER]
+    
+    if (count % 10 >= 2) and (count % 10 <= 4):
+        return words[FEW]
+    
+    return words[OTHER]
 
-def create_reminders_db(chat_id: int)  -> None:
+def create_reminders_db(chat_id: int) -> None:
     database_file = f"./databases/{chat_id}.db"
     
     if os.path.exists(database_file):
@@ -601,7 +632,7 @@ def add_reminder(chat_id: int, text: str, date: int) -> None:
         cur.execute("INSERT INTO Reminders (expires_in, content) VALUES (?, ?)", (date, text))
         
         if not chat_id in REMINDERS:
-            REMINDERS.update(chat_id, [])
+            REMINDERS[chat_id] = []
         
         REMINDERS[chat_id].append(Reminder(cur.lastrowid, date, text))
 
@@ -670,7 +701,7 @@ async def command_reminders_handler(message: Message) -> None:
         await message.answer("У вас нет активных напоминаний.")
         return
     
-    answer = "Список напоминаний:\n\n"
+    answer = "Список напоминаний:\n"
     
     for i, reminder in enumerate(reminders, start=1):
         date = datetime.fromtimestamp(reminder.date, UTC).strftime("%H:%M, %d/%m/%Y")
@@ -692,6 +723,10 @@ async def new_reminder_cancel(message: Message, state: FSMContext) -> None:
 
 @reminder_router.message(Command(REMINDER_COMMAND))
 async def command_new_reminder_handler(message: Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+    
     await state.set_state(NewReminderState.text)
     await message.answer("Введите текст напоминания", reply_markup=ReplyKeyboardRemove())
     
@@ -763,6 +798,7 @@ async def new_reminder_date(message: Message, state: FSMContext) -> None:
         
         if day < 0:
             await message.answer(f"День не может быть меньше <b>нуля</b>.\nПример: <b>{example_date}</b>")
+            return
         
         try:
             month = int(d[1])
@@ -786,14 +822,51 @@ async def new_reminder_date(message: Message, state: FSMContext) -> None:
             await message.answer(f"Последний день месяца - <b>{max_days}</b>, а не <b>{day}</b>.\nПример: <b>{example_date}</b>")
             return
         
+    now = datetime.now()
+    now_timestamp = calendar.timegm(now.timetuple())
+        
     date = datetime(year, month, day, hours, minutes)
     timestamp = calendar.timegm(date.timetuple())
+    
+    if timestamp < now_timestamp:
+        await message.answer(f"Создание напоминания на прошедшую дату бессмыслено. Введите другую дату.")
+        return
     
     data = await state.update_data(date=timestamp)
     
     await asyncio.to_thread(add_reminder, message.chat.id, data['text'], data['date'])
+
+    diff_date = relativedelta(date, now)
     
-    await message.answer(f"Напоминание успешно создано!")
+    time_values = (
+        (diff_date.years, TimeUnit.YEAR),
+        (diff_date.months, TimeUnit.MONTH),
+        (diff_date.days, TimeUnit.DAY),
+        (diff_date.hours, TimeUnit.HOUR),
+        (diff_date.minutes, TimeUnit.MINUTE),
+        (diff_date.seconds, TimeUnit.SECOND)
+    )
+    
+    add_comma = False
+    notifies_in = ""
+    for value, unit in time_values:
+        if value <= 0: continue
+        
+        if add_comma: notifies_in += ", "
+        add_comma = True
+        notifies_in += f"{value} "
+        cases: tuple[str, str, str] = None
+        match unit:
+            case TimeUnit.YEAR: cases = ("год", "года", "лет")
+            case TimeUnit.MONTH: cases = ("месяц", "месяца", "месяцев")
+            case TimeUnit.DAY: cases = ("день", "дня", "дней")
+            case TimeUnit.HOUR: cases = ("час", "часа", "часов")
+            case TimeUnit.MINUTE: cases = ("минуту", "минуты", "минут")
+            case TimeUnit.SECOND: cases = ("секунду", "секунды", "секунд")
+        notifies_in += get_word_case(value, cases)
+    notifies_in += '.'
+    
+    await message.answer(f"Напоминание успешно создано! Я напомню вам об этом через <b>{notifies_in}</b>")
 
     await state.clear()
 
