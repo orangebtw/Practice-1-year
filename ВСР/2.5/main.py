@@ -747,7 +747,7 @@ async def new_reminder_date(message: Message, state: FSMContext) -> None:
     
     t = date_time[0].split(":")
     if len(t) != 2:
-        await message.answer(f"Вы указали время неправильно.\n\nПример: <b>{example_date}</b>")
+        await message.answer(f"Вы указали время неправильно.\nПример: <b>{example_date}</b>")
         return
     
     try:
@@ -761,7 +761,7 @@ async def new_reminder_date(message: Message, state: FSMContext) -> None:
         return
     
     if hours < 0:
-        await message.answer(f"Час должен быть больше нуля.\nПример: <b>{example_date}</b>")
+        await message.answer(f"Час должен быть больше или равен нулю.\nПример: <b>{example_date}</b>")
         return
     
     try:
@@ -775,7 +775,7 @@ async def new_reminder_date(message: Message, state: FSMContext) -> None:
         return
     
     if minutes < 0:
-        await message.answer(f"Минуты должны быть больше нуля.\nПример: <b>{example_date}</b>")
+        await message.answer(f"Минуты должны быть больше или равны нулю.\nПример: <b>{example_date}</b>")
         return
     
     today = datetime.today()
