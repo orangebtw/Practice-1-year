@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, UTC
 from dataclasses import dataclass
 import calendar
-from typing import Any
+from typing import Any, Self
 from enum import Enum
 
 from dateutil.relativedelta import relativedelta
@@ -18,7 +18,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command, CommandObject
-from aiogram.types import Message, ReplyKeyboardRemove, BotCommand
+from aiogram.filters.callback_data import CallbackData
+from aiogram.types import Message, ReplyKeyboardRemove, BotCommand, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
@@ -561,6 +563,12 @@ class TimeUnit(Enum):
     MINUTE = 5
     SECOND = 6
 
+class ReminderAction(str, Enum):
+    DELETE_COMPLETED = "delete_completed"
+
+class ReminderCallback(CallbackData, prefix="reminder"):
+    action: ReminderAction
+
 REMINDERS: dict[int, list[Reminder]] = {}
 
 WEATHER_COMMAND = BotCommand(command="weather", description="Получить прогноз погоды")
@@ -694,21 +702,83 @@ async def command_weather_handler(message: Message, command: CommandObject) -> N
     
     await message.answer(f"Место: <b>{l.name}, {country_name} {flag}</b>\nПогода: <b>{detailed_status.capitalize()}</b>\nТемпература: <b>{temp} °C</b>\nМакс. температура: <b>{temp_max} °C</b>\nМин. температура: <b>{temp_min} °C</b>\nОщущается как: <b>{feels_like} °C</b>\nВлажность: <b>{humidity}%</b>\nВетер: <b>{wind_speed} м/c</b>")
 
+def get_current_reminders_text(reminders: list[Reminder]) -> str | None:
+    if len(reminders) == 0:
+        return None
+    
+    text = "Список напоминаний:\n"
+    for i, reminder in enumerate(reminders, start=1):
+        date = datetime.fromtimestamp(reminder.date, UTC).strftime("%H:%M, %d/%m/%Y")
+        status = '\u231B' if reminder.active else '\u2705'
+        text += f"{i}. {status} [{date}] {reminder.text}\n\n"
+    return text
+
 @dp.message(Command(REMINDERS_COMMAND))
 async def command_reminders_handler(message: Message) -> None:
     reminders = await asyncio.to_thread(get_reminders, message.chat.id)
     if len(reminders) == 0:
-        await message.answer("У вас нет активных напоминаний.")
+        await message.answer("У вас нет напоминаний.")
         return
     
-    answer = "Список напоминаний:\n"
+    text = get_current_reminders_text(reminders)
     
-    for i, reminder in enumerate(reminders, start=1):
-        date = datetime.fromtimestamp(reminder.date, UTC).strftime("%H:%M, %d/%m/%Y")
-        status = '\u231B' if reminder.active else '\u2705'
-        answer += f"{i}. {status} [{date}] {reminder.text}\n\n"
+    completed_present = any(not reminder.active for reminder in reminders)
+    
+    reply_markup = None
+    if completed_present:
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="Удалить завершённые напоминания", callback_data=ReminderCallback(action=ReminderAction.DELETE_COMPLETED).pack())
+        reply_markup = keyboard.as_markup()
+    
+    await message.answer(text, reply_markup=reply_markup)
+
+def delete_completed_reminders(chat_id: int) -> int:
+    database_file = f"./databases/{chat_id}.db"
+    
+    reminders = REMINDERS[chat_id]
+    
+    deleted_count = 0
+    
+    with sqlite3.connect(database_file) as conn:
+        for i in reversed(range(len(reminders))):
+            reminder = reminders[i]
+            if reminder.active: continue
+            del reminders[i]
+            
+            conn.execute("DELETE FROM Reminders WHERE id = ?", (reminder.id,))
+            deleted_count += 1
+            
+        conn.commit()
         
-    await message.answer(answer)
+    return deleted_count
+        
+
+@dp.callback_query(ReminderCallback.filter(F.action == ReminderAction.DELETE_COMPLETED))
+async def handle_delete_completed_reminders(query: CallbackQuery, callback_data: ReminderCallback, bot: Bot) -> None:
+    action = callback_data.action
+    
+    chat_id = query.from_user.id
+    
+    if action == ReminderAction.DELETE_COMPLETED:
+        reminders = REMINDERS[chat_id]
+        
+        if len(reminders) > 0:
+            deleted_count = await asyncio.to_thread(delete_completed_reminders, chat_id)
+            
+            word = get_word_case(deleted_count, ("неактивное напоминание", "неактивных напоминания", "неактивных напоминаний"))
+            
+            new_text = f"Вы успешно удалили {deleted_count} {word}.\n"
+            
+            reminders_text = get_current_reminders_text(reminders)
+            
+            new_text += reminders_text if reminders_text else "На данный момент у вас нет напоминаний."
+            
+            await query.message.delete_reply_markup()
+            await query.message.edit_text(new_text)
+        else:
+            await query.message.answer(f"У вас пока нет завершённых напоминаний.")
+    
+    await query.answer()
 
 @reminder_router.message(Command(CANCEL_COMMAND))
 @reminder_router.message(F.text.casefold() == "cancel")
@@ -734,7 +804,7 @@ async def command_new_reminder_handler(message: Message, state: FSMContext) -> N
 async def new_reminder_text(message: Message, state: FSMContext) -> None:
     await state.update_data(text=message.text)
     await state.set_state(NewReminderState.date)
-    await message.answer("Теперь введите время и дату напоминания в формате: ЧЧ:ММ ДД/ММ/ГГГГ\n<i>Дата не обязательна, по умолчанию - текущий день</i>")
+    await message.answer("Теперь введите время и дату напоминания в формате: <b>ЧЧ:ММ ДД/ММ/ГГГГ</b>\n\nПримечание:\n<i>Дата не обязательна, по умолчанию - текущий день</i>")
 
 @reminder_router.message(NewReminderState.date)
 async def new_reminder_date(message: Message, state: FSMContext) -> None:
@@ -850,7 +920,7 @@ async def new_reminder_date(message: Message, state: FSMContext) -> None:
     add_comma = False
     notifies_in = ""
     for value, unit in time_values:
-        if value <= 0: continue
+        if unit != TimeUnit.SECOND and value <= 0: continue
         
         if add_comma: notifies_in += ", "
         add_comma = True
@@ -882,36 +952,60 @@ async def check_reminders_expiration() -> None:
                 date = datetime.fromtimestamp(reminder.date, UTC).strftime("%H:%M, %d/%m/%Y")
                 await bot.send_message(chat_id, f"Напоминание:\n\n{reminder.text}\n\n{date}")
 
-ROCK = "камень"
-PAPER = "бумага"
-SCISSORS = "ножницы"
-RPS_VARIANTS = [ROCK, PAPER, SCISSORS]
+class RpsVariant(Enum):
+    ROCK = 1
+    PAPER = 2
+    SCISSORS = 3
+    
+    def from_name(name: str) -> Self | None:
+        match name:
+            case "камень": return RpsVariant.ROCK
+            case "бумага": return RpsVariant.PAPER
+            case "ножницы": return RpsVariant.SCISSORS
+            case _: return None
+    
+    @property
+    def name(self) -> str:
+        match self:
+            case RpsVariant.ROCK: return "камень"
+            case RpsVariant.PAPER: return "бумага"
+            case RpsVariant.SCISSORS: return "ножницы"
+            
+    @property
+    def name_acusative(self) -> str:
+        match self:
+            case RpsVariant.ROCK: return "камень"
+            case RpsVariant.PAPER: return "бумагу"
+            case RpsVariant.SCISSORS: return "ножницы"
+
+RPS_VARIANTS = [RpsVariant.ROCK, RpsVariant.PAPER, RpsVariant.SCISSORS]
 
 RPS_MAP = {
-    ROCK: SCISSORS,
-    PAPER: ROCK,
-    SCISSORS: PAPER
+    RpsVariant.ROCK: RpsVariant.SCISSORS,
+    RpsVariant.PAPER: RpsVariant.ROCK,
+    RpsVariant.SCISSORS: RpsVariant.PAPER
 }
 
 @dp.message(Command(RPS_COMMAND))
 async def command_rps_handler(message: Message, command: CommandObject) -> None:
-    if command.args is None or command.args.isspace():
+    if not command.args or command.args.isspace():
         await message.answer("Вы не выбрали предмет.\nПример использования: /rps камень")
         return
     
-    if command.args not in RPS_VARIANTS:
-        await message.answer(f"Такого варианта нет.\nВозможные варианты: {ROCK}, {SCISSORS}, {PAPER}.")
+    user_variant = RpsVariant.from_name(command.args.lower())
+    
+    if user_variant is None:
+        await message.answer(f"Такого варианта нет.\nВозможные варианты: {RpsVariant.ROCK.name}, {RpsVariant.SCISSORS.name}, {RpsVariant.PAPER.name}.")
         return
     
-    user_variant = command.args.lower()
     variant = random.choice(RPS_VARIANTS)
     
     if RPS_MAP.get(user_variant) == variant:
-        await message.answer(f"Вы выиграли! Я загадал: <b>{variant}</b>")
+        await message.answer(f"Вы выиграли! Я выбрал <b>{variant.name_acusative}</b>.")
     elif RPS_MAP.get(variant) == user_variant:
-        await message.answer(f"Вы проиграли! Я загадал: <b>{variant}</b>")
+        await message.answer(f"Вы проиграли! Я выбрал <b>{variant.name_acusative}</b>.")
     else:
-        await message.answer(f"Ничья! Я загадал: <b>{variant}</b>")
+        await message.answer(f"Ничья! Я выбрал <b>{variant.name_acusative}</b>.")
 
 def load_all_reminders() -> None:
     now = datetime.now()
@@ -942,6 +1036,8 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_reminders_expiration, IntervalTrigger(seconds=10))
     scheduler.start()
+    
+    logging.getLogger('apscheduler.executors.default').setLevel(logging.WARNING)
     
     await dp.start_polling(bot)
     
