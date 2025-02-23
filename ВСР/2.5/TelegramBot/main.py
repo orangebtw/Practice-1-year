@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, UTC
 from dataclasses import dataclass
 import calendar
-from typing import Any, Self
+from typing import Any, Self, Iterable
 from enum import Enum
 
 from dateutil.relativedelta import relativedelta
@@ -700,9 +700,18 @@ async def command_weather_handler(message: Message, command: CommandObject) -> N
     
     flag = COUNTRY_CODE_TO_FLAG[l.country]
     
-    await message.answer(f"Место: <b>{l.name}, {country_name} {flag}</b>\nПогода: <b>{detailed_status.capitalize()}</b>\nТемпература: <b>{temp} °C</b>\nМакс. температура: <b>{temp_max} °C</b>\nМин. температура: <b>{temp_min} °C</b>\nОщущается как: <b>{feels_like} °C</b>\nВлажность: <b>{humidity}%</b>\nВетер: <b>{wind_speed} м/c</b>")
+    await message.answer((
+        f"Место: <b>{l.name}, {country_name} {flag}</b>\n"
+        f"Погода: <b>{detailed_status.capitalize()}</b>\n"
+        f"Температура: <b>{temp} °C</b>\n"
+        f"Макс. температура: <b>{temp_max} °C</b>\n"
+        f"Мин. температура: <b>{temp_min} °C</b>\n"
+        f"Ощущается как: <b>{feels_like} °C</b>\n"
+        f"Влажность: <b>{humidity}%</b>\n"
+        f"Ветер: <b>{wind_speed} м/c</b>"
+    ))
 
-def get_current_reminders_text(reminders: list[Reminder]) -> str | None:
+def get_current_reminders_text(reminders: Iterable[Reminder]) -> str | None:
     if len(reminders) == 0:
         return None
     
@@ -804,7 +813,11 @@ async def command_new_reminder_handler(message: Message, state: FSMContext) -> N
 async def new_reminder_text(message: Message, state: FSMContext) -> None:
     await state.update_data(text=message.text)
     await state.set_state(NewReminderState.date)
-    await message.answer("Теперь введите время и дату напоминания в формате: <b>ЧЧ:ММ ДД/ММ/ГГГГ</b>\n\nПримечание:\n<i>Дата не обязательна, по умолчанию - текущий день</i>")
+    await message.answer((
+        "Теперь введите время и дату напоминания в формате: <b>ЧЧ:ММ ДД/ММ/ГГГГ</b>\n\n"
+        "Примечание:\n"
+        "<i>Дата не обязательна, по умолчанию - текущий день</i>"
+    ))
 
 @reminder_router.message(NewReminderState.date)
 async def new_reminder_date(message: Message, state: FSMContext) -> None:
@@ -995,7 +1008,10 @@ async def command_rps_handler(message: Message, command: CommandObject) -> None:
     user_variant = RpsVariant.from_name(command.args.lower())
     
     if user_variant is None:
-        await message.answer(f"Такого варианта нет.\nВозможные варианты: {RpsVariant.ROCK.name}, {RpsVariant.SCISSORS.name}, {RpsVariant.PAPER.name}.")
+        await message.answer((
+            f"Такого варианта нет.\n"
+            f"Возможные варианты: {RpsVariant.ROCK.name}, {RpsVariant.SCISSORS.name}, {RpsVariant.PAPER.name}."
+        ))
         return
     
     variant = random.choice(RPS_VARIANTS)
